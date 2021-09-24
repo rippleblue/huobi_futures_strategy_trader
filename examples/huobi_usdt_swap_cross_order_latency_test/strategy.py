@@ -28,7 +28,7 @@ from alpha.order import ORDER_ACTION_SELL, ORDER_ACTION_BUY, ORDER_STATUS_FAILED
 
 class MyStrategy:
 
-    def __init__(self):
+    def __init__(self, **kwargs):
         """ 初始化
         """
         self.strategy = config.strategy
@@ -38,7 +38,6 @@ class MyStrategy:
         self.secret_key = config.accounts[0]["secret_key"]
         self.host = config.accounts[0]["host"]
         self.wss = config.accounts[0]["wss"]
-        self.symbol = config.symbol
         self.contract_type = config.contract_type
         self.channels = config.markets[0]["channels"]
         self.orderbook_length = config.markets[0]["orderbook_length"]
@@ -47,22 +46,29 @@ class MyStrategy:
         self.trades_length = config.markets[0]["trades_length"]
         self.market_wss = config.markets[0]["wss"]
 
-        
-        # 杠杆与面值
-        self.lever_rate = 1
-        self.contract_size = 0.001
+        self.symbol = kwargs.get("symbol")
+        self.contract_size = kwargs.get("contract_size")
+
         self.orderbook_invalid_seconds = 10
 
         self.last_bid_price = 0 # 上次的买入价格
         self.last_ask_price = 0 # 上次的卖出价格
         self.last_orderbook_timestamp = 0 # 上次的orderbook时间戳
 
-        self.raw_symbol = self.symbol.split('-')[0]
+        self.raw_symbol = self.symbol.split('-')[1].upper()
 
         self.ask1_price = 0
         self.bid1_price = 0
         self.ask1_volume = 0
         self.bid1_volume = 0
+
+        
+        self.total_count = 0
+        self.exceed_1s_count = 0
+        self.exceed_100ms_count = 0
+        self.exceed_50ms_count = 0
+
+        self.orderids = {}
 
 
         # 交易模块
@@ -82,6 +88,7 @@ class MyStrategy:
             "init_success_callback": self.on_event_init_success_callback,
         }
         self.trader = Trade(**cc)
+        
 
         # 行情模块
         cc = {
@@ -100,7 +107,12 @@ class MyStrategy:
         self.market = Market(**cc)
                 
         # 60秒执行1次
-        LoopRunTask.register(self.on_ticker, 10)
+        LoopRunTask.register(self.on_ticker, 2)
+
+        LoopRunTask.register(self.on_showresult, 10)
+
+    async def on_showresult(self, *args, **kwargs):
+        logger.error(self.symbol, " order statics result: total_count: ", self.total_count, "exceed_1s_count:", self.exceed_1s_count, "exceed_100ms_count:", self.exceed_100ms_count, "exceed_50ms_count:", self.exceed_50ms_count, )
 
     async def on_ticker(self, *args, **kwargs):
         """ 定时执行任务
@@ -130,28 +142,30 @@ class MyStrategy:
         if self.trader.position and self.trader.position.short_quantity:
             # 平空单
             price = round(self.ask1_price - 0.1, 1)
-            quantity = -self.trader.position.short_quantity
+            #quantity = -self.trader.position.short_quantity
+            quantity = -1
             action = ORDER_ACTION_BUY
             new_price = str(price)  # 将价格转换为字符串，保持精度
             if quantity:
-                orders_data.append({"price": new_price, "quantity": quantity, "action": action, "order_type": ORDER_TYPE_LIMIT, "lever_rate": self.lever_rate})
+                orders_data.append({"price": new_price, "quantity": quantity, "action": action, "order_type": ORDER_TYPE_LIMIT, "lever_rate": 5})
                 self.last_ask_price = self.ask1_price
         if self.trader.assets and self.trader.assets.assets.get(self.raw_symbol):
             # 开空单
             price = round(self.bid1_price + 0.1, 1)
-            volume = int(float(self.trader.assets.assets.get(self.raw_symbol).get("free")) / price / self.contract_size * self.lever_rate) 
+            #volume = int(float(self.trader.assets.assets.get(self.raw_symbol).get("free")) * 5/ price / self.contract_size) 
+            volume = 1
             if volume >= 1:
                 quantity = - volume #  空1张
                 action = ORDER_ACTION_SELL
                 new_price = str(price)  # 将价格转换为字符串，保持精度
                 if quantity:
-                    orders_data.append({"price": new_price, "quantity": quantity, "action": action, "order_type": ORDER_TYPE_LIMIT, "lever_rate": self.lever_rate})
+                    orders_data.append({"price": new_price, "quantity": quantity, "action": action, "order_type": ORDER_TYPE_LIMIT, "lever_rate": 5})
                     self.last_bid_price = self.bid1_price
 
         if orders_data:
             order_nos, error = await self.trader.create_orders(orders_data)
             if error:
-                logger.error(self.strategy, "create future order error! error:", error, caller=self)
+                logger.warn(self.strategy, "create future order error! error:", error, caller=self)
             logger.info(self.strategy, "create future orders success:", order_nos, caller=self)
 
     async def on_event_orderbook_update(self, orderbook: Orderbook):
@@ -172,6 +186,18 @@ class MyStrategy:
         """ 订单状态更新
         """
         logger.info("order update:", order, caller=self)
+        notifyts = order.utime
+        createts = order.ctime
+        nowtime = time.time() 
+        self.total_count += 1
+        if nowtime*1000 - notifyts > 1000:
+            self.exceed_1s_count += 1
+            logger.error("order info:", order ,caller = self)
+        if nowtime*1000 - notifyts > 100:
+            self.exceed_100ms_count += 1
+        if nowtime*1000 - notifyts > 50:
+            self.exceed_50ms_count += 1
+
 
     async def on_event_asset_update(self, asset: Asset):
         """ 资产更新
